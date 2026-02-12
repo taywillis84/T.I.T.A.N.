@@ -16,7 +16,7 @@ TEXT_DIM = "#999999"
 SUCCESS_GREEN = "#2ECC71"
 FAIL_RED = "#E74C3C"
 
-# Path persistence as requested
+# Path persistence: targets.json remains in the TITAN directory as requested
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "targets.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "titan_history.log")
@@ -32,6 +32,7 @@ class TitanGUI:
         self.tool_btns = {} 
         self.setup_styles()
         self.create_widgets()
+        self.log_event("Session Started")
 
     def load_config(self):
         if not os.path.exists(CONFIG_FILE):
@@ -43,6 +44,15 @@ class TitanGUI:
     def save_config(self):
         with open(CONFIG_FILE, "w") as f: json.dump(self.data, f, indent=4)
 
+    def log_event(self, message):
+        """Appends a timestamped message to the titan_history.log file"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(LOG_FILE, "a") as f:
+                f.write(f"[{timestamp}] {message}\n")
+        except Exception as e:
+            print(f"Logging error: {e}")
+
     def setup_styles(self):
         style = ttk.Style()
         style.theme_use('clam')
@@ -51,7 +61,6 @@ class TitanGUI:
         style.configure("TLabelframe.Label", background=BG_DARK, foreground=ACCENT, font=("Courier", 10, "bold"))
 
     def create_widgets(self):
-        # Header with the new official name
         header = tk.Frame(self.root, bg=BG_DARK)
         header.pack(fill="x", pady=15)
         tk.Label(header, text="T.I.T.A.N.", font=("Courier", 32, "bold"), fg=ACCENT, bg=BG_DARK).pack()
@@ -72,7 +81,7 @@ class TitanGUI:
         self.host_entry = tk.Entry(f1, bg=BG_PANEL, fg=ACCENT, insertbackground=ACCENT)
         self.host_entry.grid(row=0, column=3, padx=10)
 
-        # Step 2: Credential Ingestion with Notes
+        # Step 2: Credential Ingestion
         cred_frame = ttk.LabelFrame(self.root, text=" 02: CREDENTIAL INGESTION ")
         cred_frame.pack(fill="x", padx=20, pady=5)
         f2 = tk.Frame(cred_frame, bg=BG_DARK)
@@ -93,7 +102,7 @@ class TitanGUI:
         tk.Button(cred_frame, text="✚ ADD MANUAL", command=self.add_manual, bg=ACCENT, fg="black", width=15).pack(side="left", padx=50, pady=5)
         tk.Button(cred_frame, text="📂 MIMIKATZ IMPORT", command=self.import_mimi, bg="#393E46", fg=TEXT_PRIMARY, width=18).pack(side="right", padx=50, pady=5)
 
-        # Step 3: Dispatch & Attack Grid
+        # Step 3: Dispatch Control
         strike_frame = ttk.LabelFrame(self.root, text=" 03: DISPATCH CONTROL ")
         strike_frame.pack(fill="both", expand=True, padx=20, pady=10)
 
@@ -120,7 +129,6 @@ class TitanGUI:
             btn.grid(row=i//3, column=i%3, padx=10, pady=10)
             self.tool_btns[tool] = btn
 
-        # Mass Test Button
         tk.Button(strike_frame, text="☢ EXECUTE ALL-TOOL TEST ☢", command=self.test_all_tools, 
                   bg="#D35400", fg="white", font=("Courier", 10, "bold"), height=2).pack(fill="x", padx=100, pady=10)
 
@@ -141,11 +149,15 @@ class TitanGUI:
         
         cred = self.data[target_ip]['creds'][idx]
         user, secret, c_type = cred['user'], cred['secret'], cred['type']
+        self.log_event(f"Bulk Test Started: Target {target_ip} as {user}")
 
         def run_tests():
-            # SCAN KEYWORDS for tools that hide errors behind successful exit codes
             fail_keywords = ["failed", "error", "denied", "not known", "invalid", "connection refused", "could not", "cannot", "unreachable"]
             for tool, btn in self.tool_btns.items():
+                if tool == "Evil-WinRM": # Skip automated Evil-WinRM check
+                    btn.config(bg=BG_PANEL, fg=TEXT_DIM)
+                    continue
+
                 btn.config(bg="#34495E", fg="white") 
                 cmd = self.get_cmd(tool, target_ip, user, secret, c_type)
                 try:
@@ -153,10 +165,13 @@ class TitanGUI:
                     output = (result.stdout + result.stderr).lower()
                     if result.returncode != 0 or any(kw in output for kw in fail_keywords):
                         btn.config(bg=FAIL_RED, fg="white")
+                        self.log_event(f"TEST FAILED: {tool} on {target_ip}")
                     else:
                         btn.config(bg=SUCCESS_GREEN, fg="black")
-                except Exception:
+                        self.log_event(f"TEST SUCCESS: {tool} on {target_ip}")
+                except Exception as e:
                     btn.config(bg=FAIL_RED, fg="white")
+                    self.log_event(f"TEST ERROR: {tool} on {target_ip} - {str(e)}")
         threading.Thread(target=run_tests, daemon=True).start()
 
     def update_creds(self, event=None):
@@ -195,11 +210,14 @@ class TitanGUI:
         self.data[target]['creds'][idx].update({"user": u, "secret": s, "notes": n if n else ""})
         self.data[target]['creds'][idx]['type'] = "hash" if len(s) == 32 and all(x in "0123456789abcdefABCDEF" for x in s) else "password"
         self.save_config(); self.refresh_manager_list(frame, target); self.update_creds()
+        self.log_event(f"CREDENTIAL EDITED: {u} on {target}")
 
     def delete_cred(self, target, idx, frame):
+        user = self.data[target]['creds'][idx]['user']
         if messagebox.askyesno("Confirm", "Delete this credential?"):
             del self.data[target]['creds'][idx]
             self.save_config(); self.refresh_manager_list(frame, target); self.update_creds()
+            self.log_event(f"CREDENTIAL DELETED: {user} on {target}")
 
     def add_manual(self):
         ip, host, user, secret, notes = self.ip_entry.get(), self.host_entry.get(), self.user_entry.get(), self.secret_entry.get(), self.notes_entry.get()
@@ -208,6 +226,7 @@ class TitanGUI:
         c_type = "hash" if len(secret) == 32 and all(x in "0123456789abcdefABCDEF" for x in secret) else "password"
         if self.add_unique(ip, user, c_type, secret, notes):
             self.save_config(); self.target_cb['values'] = list(self.data.keys()); self.update_creds()
+            self.log_event(f"TARGET ADDED: {user}@{ip}")
 
     def add_unique(self, ip, user, c_type, secret, notes=""):
         if any(c['user'] == user and c['secret'] == secret for c in self.data[ip]['creds']): return False
@@ -218,8 +237,12 @@ class TitanGUI:
         ip = self.target_cb.get()
         if ip == "-- SELECT TARGET --": return
         res = subprocess.run(["ping", "-c", "1", "-W", "2", ip], stdout=subprocess.DEVNULL)
-        if res.returncode == 0: messagebox.showinfo("Ping", f"Target {ip} is REACHABLE")
-        else: messagebox.showerror("Ping", f"Target {ip} is UNREACHABLE")
+        if res.returncode == 0:
+            messagebox.showinfo("Ping", f"Target {ip} is REACHABLE")
+            self.log_event(f"REACHABILITY: {ip} is UP")
+        else:
+            messagebox.showerror("Ping", f"Target {ip} is UNREACHABLE")
+            self.log_event(f"REACHABILITY: {ip} is DOWN")
 
     def launch(self, tool):
         target_ip = self.target_cb.get()
@@ -228,13 +251,57 @@ class TitanGUI:
         cred = self.data[target_ip]['creds'][idx]
         cmd = self.get_cmd(tool, target_ip, cred['user'], cred['secret'], cred['type'])
         if cmd:
-            # Strip test flags for the real launch
             launch_cmd = cmd.replace(" -c 'ls'", "").replace(" +auth-only", "").replace(" -c 'whoami'", "").replace(" 'whoami'", "")
             subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "{launch_cmd}; exec bash"'])
+            self.log_event(f"TOOL LAUNCHED: {tool} on {target_ip} as {cred['user']}")
 
     def import_mimi(self):
-        # Implementation remains the same as previous functional versions
-        pass
+        """Fixed logic to parse Mimikatz output text files for User, Domain, and NTLM hashes"""
+        file_path = filedialog.askopenfilename(title="Select Mimikatz Output", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if not file_path: return
+        
+        target_ip = self.ip_entry.get()
+        if not target_ip:
+            messagebox.showwarning("Input Required", "Please enter a Target IP in Step 1 before importing.")
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            
+            # Split by Authentication Id blocks to isolate distinct credential sets
+            blocks = re.split(r'\* Authentication Id', content)
+            count = 0
+            
+            for block in blocks:
+                user_match = re.search(r'User\s+:\s+(.+)', block)
+                dom_match = re.search(r'Domain\s+:\s+(.+)', block)
+                hash_match = re.search(r'NTLM\s+:\s+([a-fA-F0-9]{32})', block)
+                
+                if user_match and hash_match:
+                    user = user_match.group(1).strip()
+                    domain = dom_match.group(1).strip() if dom_match else "LOCAL"
+                    ntlm = hash_match.group(1).strip()
+                    
+                    # Skip machine accounts and empty entries
+                    if user.endswith('$') or user.lower() == "none": continue
+                    
+                    if target_ip not in self.data:
+                        self.data[target_ip] = {"hostname": self.host_entry.get() or "Imported", "creds": []}
+                    
+                    full_user = f"{domain}\\{user}" if domain != "LOCAL" else user
+                    if self.add_unique(target_ip, full_user, "hash", ntlm, "Mimikatz Import"):
+                        count += 1
+            
+            self.save_config()
+            self.target_cb['values'] = list(self.data.keys())
+            self.update_creds()
+            self.log_event(f"MIMIKATZ IMPORT: Imported {count} hashes for {target_ip}")
+            messagebox.showinfo("Import Complete", f"Imported {count} hashes for {target_ip}.")
+            
+        except Exception as e:
+            self.log_event(f"MIMIKATZ IMPORT ERROR: {str(e)}")
+            messagebox.showerror("Error", f"Failed to parse file: {str(e)}")
 
 if __name__ == "__main__":
     root = tk.Tk()
