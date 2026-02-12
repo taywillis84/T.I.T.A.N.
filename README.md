@@ -43,7 +43,7 @@ Per system requirements, ensure the targets.json file remains in the root projec
 
 <pre>
 ~/TITAN/
-├── TITAN-GUI.py
+├── TITAN.py
 ├── TITAN-CLI.py
 ├── targets.json      # Shared Database
 └── titan_history.log # Centralized Logs
@@ -53,7 +53,7 @@ Per system requirements, ensure the targets.json file remains in the root projec
 Add the following to your ~/.zshrc to launch the tools from anywhere:
 
 Bash
-<pre>alias titan='python3 ~/TITAN/TITAN-GUI.py'
+<pre>alias titan='python3 ~/TITAN/TITAN.py'
 alias titan-cli='python3 ~/TITAN/TITAN-CLI.py'
 source ~/.zshrc.</pre>
 
