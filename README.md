@@ -67,3 +67,14 @@ Audit: Hit "Test All Tools" to see which protocols are accessible.
 Dispatch: Select your tool of choice and launch into the target.
 
 Note: This tool is intended for authorized security testing only. Log all actions responsibly via the built-in history file.
+
+# **TO DO**
+
+I want to add a kerberos Golden Ticket generator if a secretsdump was successful
+
+Upload Secrets Dump or krbtgt hash and it will:
+  1) Get KRBTGT Hash
+  2) Get Domain SID
+  3) Run Impacket-Ticketer
+  4) Export ticket locally
+  5) attempt to pop into computer with PSExec or WMIExec or something
