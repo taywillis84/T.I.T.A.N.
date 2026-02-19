@@ -235,7 +235,7 @@ def get_cmd(tool, target_ip, user, secret, c_type, testing=False):
     elif tool == "SSH":
         if c_type == "hash":
             return "echo 'SSH requires a plaintext password' >&2; exit 1"
-        cmd = f"sshpass -p '{secret}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 '{user}'@{target_ip}"
+        cmd = f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 '{user}'@{target_ip}"
         return cmd + " 'whoami'" if testing else cmd
     elif tool == "SecretsDump":
         return f"impacket-secretsdump '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip}"

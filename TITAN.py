@@ -264,7 +264,7 @@ class TitanGUI:
         elif tool == "SSH":
             if c_type == "hash":
                 return "echo 'SSH requires a plaintext password' >&2; exit 1"
-            return f"sshpass -p '{secret}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 '{user}'@{target_ip} 'whoami'"
+            return f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 '{user}'@{target_ip} 'whoami'"
         
         elif tool == "SecretsDump": 
             clean_user = user
