@@ -1,11 +1,12 @@
 import json
 import os
 import subprocess
-import re
 import threading
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk, simpledialog
 from datetime import datetime
+
+from parsers import parse_credential_file
 
 # --- CONFIGURATION & THEME ---
 BG_DARK = "#121212"
@@ -303,78 +304,62 @@ class TitanGUI:
             subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "{launch_cmd}; exec bash"'])
             self.log_event(f"TOOL LAUNCHED: {tool} on {target_ip} as {cred['user']}")
 
+    def ingest_parsed_credentials(self, target_ip, host, parsed_records, source_label):
+        if target_ip not in self.data:
+            self.data[target_ip] = {"hostname": host or "Imported", "creds": []}
+
+        count = 0
+        for record in parsed_records:
+            username = record.get("username") or ""
+            domain = record.get("domain") or ""
+            secret_type = record.get("secret_type") or "password"
+            secret_value = record.get("secret_value") or ""
+            if not username or not secret_value:
+                continue
+
+            full_user = f"{domain}\\{username}" if domain and domain != "LOCAL" else username
+            context = record.get("source_context") or source_label
+            source_file = os.path.basename(record.get("source_file") or source_label)
+            source_line = record.get("source_line")
+            notes = f"{secret_type.upper()} | {source_file}"
+            if source_line:
+                notes += f":{source_line}"
+            if context:
+                notes += f" | {context[:80]}"
+
+            if self.add_unique(target_ip, full_user, secret_type, secret_value, notes):
+                count += 1
+
+        return count
+
     def import_mimi(self):
-        """Advanced parser: Prioritizes cleartext passwords, falls back to NTLM hashes."""
-        file_path = filedialog.askopenfilename(title="Select Mimikatz Output", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
-        if not file_path: return
-        
+        file_path = filedialog.askopenfilename(title="Select Credential Dump", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if not file_path:
+            return
+
         target_ip = self.ip_entry.get()
         if not target_ip:
             messagebox.showwarning("Input Required", "Please enter a Target IP in Step 1 before importing.")
             return
 
         try:
-            # Handle potential UTF-16 encoding from Mimikatz logs
-            try:
-                with open(file_path, "r", encoding="utf-16") as f:
-                    content = f.read()
-            except (UnicodeError, UnicodeDecodeError):
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-            
-            # Split by Authentication Id to isolate distinct user sessions
-            sessions = content.split('Authentication Id :')
-            count = 0
-            
-            for session in sessions:
-                # 1. Identify User and Domain
-                user_match = re.search(r'\* Username : (.+)', session)
-                dom_match = re.search(r'\* Domain\s+: (.+)', session)
-                
-                if not user_match: continue
-                
-                user = user_match.group(1).strip()
-                domain = dom_match.group(1).strip() if dom_match else ""
-                
-                # Skip machine accounts and empty entries
-                if user == '(null)' or user.endswith('$'): continue
-                
-                # 2. Priority Logic: Scan for any cleartext password in the session
-                passwords = re.findall(r'\* Password : (.*)', session)
-                cleartext = None
-                for p in passwords:
-                    p_clean = p.strip()
-                    if p_clean and p_clean != '(null)':
-                        cleartext = p_clean
-                        break 
-
-                # 3. Fallback: Identify NTLM Hash
-                ntlm_match = re.search(r'\* NTLM\s+: ([a-fA-F0-9]{32})', session)
-                ntlm_hash = ntlm_match.group(1).strip() if ntlm_match else None
-
-                # 4. Ingest into TITAN Data
-                if target_ip not in self.data:
-                    self.data[target_ip] = {"hostname": self.host_entry.get() or "Imported", "creds": []}
-                
-                full_user = f"{domain}\\{user}" if domain and domain != "LOCAL" else user
-                
-                # Apply User Choice: Password if found, else NTLM
-                if cleartext:
-                    if self.add_unique(target_ip, full_user, "password", cleartext, "Mimi Cleartext"):
-                        count += 1
-                elif ntlm_hash:
-                    if self.add_unique(target_ip, full_user, "hash", ntlm_hash, "Mimi NTLM"):
-                        count += 1
-            
+            parsed_records = parse_credential_file(file_path)
+            imported_count = self.ingest_parsed_credentials(
+                target_ip=target_ip,
+                host=self.host_entry.get(),
+                parsed_records=parsed_records,
+                source_label="GUI Import",
+            )
             self.save_config()
             self.target_cb['values'] = list(self.data.keys())
             self.update_creds()
-            self.log_event(f"MIMIKATZ IMPORT: Processed {count} credentials for {target_ip}")
-            messagebox.showinfo("Import Complete", f"Successfully imported {count} credentials for {target_ip}.")
-            
+            self.log_event(f"CREDENTIAL IMPORT: Processed {imported_count} credentials for {target_ip} from {file_path}")
+            messagebox.showinfo("Import Complete", f"Successfully imported {imported_count} credentials for {target_ip}.")
+
         except Exception as e:
-            self.log_event(f"MIMIKATZ IMPORT ERROR: {str(e)}")
+            self.log_event(f"CREDENTIAL IMPORT ERROR: {str(e)}")
             messagebox.showerror("Error", f"Failed to parse file: {str(e)}")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
