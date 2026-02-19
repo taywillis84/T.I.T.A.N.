@@ -12,6 +12,7 @@ from parsers import parse_credential_file
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "targets.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "titan_history.log")
+SCHEMA_VERSION = 2
 
 
 def log_action(target, user, tool, status):
@@ -24,32 +25,149 @@ def log_action(target, user, tool, status):
         pass
 
 
+def utc_timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def split_user_domain(user):
+    if "\\" in user:
+        domain, username = user.split("\\", 1)
+        return username, domain
+    return user, ""
+
+
+def build_credential(target_scope, user, secret_type, secret_value, notes="", provenance=None, existing=None):
+    now = utc_timestamp()
+    username, domain = split_user_domain(user)
+    existing = existing or {}
+    provenance = provenance or {}
+    existing_provenance = existing.get("provenance") if isinstance(existing.get("provenance"), dict) else {}
+    existing_lifecycle = existing.get("lifecycle") if isinstance(existing.get("lifecycle"), dict) else {}
+    legacy_added = existing.get("added") or existing_provenance.get("first_seen")
+
+    return {
+        "identity": {
+            "username": username,
+            "domain": domain,
+            "target_scope": target_scope,
+        },
+        "secret": {
+            "type": secret_type,
+            "value": secret_value,
+        },
+        "provenance": {
+            "imported_from": provenance.get("imported_from") or existing_provenance.get("imported_from") or "manual",
+            "parser": provenance.get("parser") or existing_provenance.get("parser") or "manual",
+            "first_seen": provenance.get("first_seen") or existing_provenance.get("first_seen") or legacy_added or now,
+            "raw_evidence_snippet": provenance.get("raw_evidence_snippet") or notes or existing_provenance.get("raw_evidence_snippet") or "",
+        },
+        "testing": existing.get("testing") if isinstance(existing.get("testing"), dict) else {"protocols": {}},
+        "lifecycle": {
+            "added_at": existing_lifecycle.get("added_at") or legacy_added or now,
+            "updated_at": now,
+            "active": existing_lifecycle.get("active", True),
+        },
+        "notes": notes or existing.get("notes", ""),
+        "user": user,
+        "type": secret_type,
+        "secret": secret_value,
+        "added": legacy_added or now,
+    }
+
+
+def migrate_config(raw_data):
+    if isinstance(raw_data, dict) and "targets" in raw_data:
+        targets = raw_data.get("targets") or {}
+    elif isinstance(raw_data, dict):
+        targets = raw_data
+    else:
+        targets = {}
+
+    migrated_targets = {}
+    for target_ip, target_data in targets.items():
+        target_data = target_data if isinstance(target_data, dict) else {}
+        creds = target_data.get("creds") if isinstance(target_data.get("creds"), list) else []
+        migrated_creds = []
+        for cred in creds:
+            if not isinstance(cred, dict):
+                continue
+            if all(k in cred for k in ["identity", "secret", "provenance", "testing", "lifecycle"]):
+                user = cred.get("user")
+                if not user:
+                    identity = cred.get("identity") or {}
+                    username = identity.get("username", "")
+                    domain = identity.get("domain", "")
+                    user = f"{domain}\\{username}" if domain else username
+                secret_data = cred.get("secret") or {}
+                cred["user"] = user
+                cred["type"] = secret_data.get("type", cred.get("type", "password"))
+                cred["secret"] = secret_data.get("value", cred.get("secret", ""))
+                cred["notes"] = cred.get("notes") or (cred.get("provenance") or {}).get("raw_evidence_snippet", "")
+                cred["added"] = cred.get("added") or (cred.get("lifecycle") or {}).get("added_at") or utc_timestamp()
+                migrated_creds.append(cred)
+                continue
+
+            user = cred.get("user", "")
+            secret_type = cred.get("type", "password")
+            secret_value = cred.get("secret", "")
+            notes = cred.get("notes", "")
+            migrated_creds.append(
+                build_credential(
+                    target_scope=target_ip,
+                    user=user,
+                    secret_type=secret_type,
+                    secret_value=secret_value,
+                    notes=notes,
+                    provenance={"imported_from": "legacy", "parser": "legacy"},
+                    existing=cred,
+                )
+            )
+
+        migrated_targets[target_ip] = {
+            "hostname": target_data.get("hostname", "N/A"),
+            "creds": migrated_creds,
+        }
+
+    return {"schema_version": SCHEMA_VERSION, "targets": migrated_targets}
+
+
 def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {}
     try:
         with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
+            raw_data = json.load(f)
     except Exception:
-        return {}
+        raw_data = {}
+
+    migrated = migrate_config(raw_data)
+    if migrated != raw_data:
+        with open(CONFIG_FILE, "w") as handle:
+            json.dump(migrated, handle, indent=4)
+    return migrated.get("targets", {})
 
 
 def save_config(data):
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "targets": data,
+    }
     with open(CONFIG_FILE, "w") as handle:
-        json.dump(data, handle, indent=4)
+        json.dump(payload, handle, indent=4)
 
 
-def add_unique_cred(data, ip, user, secret_type, secret_value, notes=""):
+def add_unique_cred(data, ip, user, secret_type, secret_value, notes="", provenance=None):
     if any(c['user'] == user and c['secret'] == secret_value for c in data[ip]['creds']):
         return False
     data[ip]['creds'].append(
-        {
-            "user": user,
-            "type": secret_type,
-            "secret": secret_value,
-            "notes": notes,
-            "added": datetime.now().strftime("%Y-%m-%d %H:%M"),
-        }
+        build_credential(
+            target_scope=ip,
+            user=user,
+            secret_type=secret_type,
+            secret_value=secret_value,
+            notes=notes,
+            provenance=provenance,
+        )
     )
     return True
 
@@ -81,7 +199,14 @@ def import_credentials_file(file_path, target_ip, hostname="Imported", format_hi
         if source_context:
             notes += f" | {source_context[:80]}"
 
-        if add_unique_cred(data, target_ip, full_user, secret_type, secret_value, notes):
+        prov = {
+            "imported_from": source_file,
+            "parser": format_hint or "auto",
+            "first_seen": utc_timestamp(),
+            "raw_evidence_snippet": source_context[:200] if source_context else notes,
+        }
+
+        if add_unique_cred(data, target_ip, full_user, secret_type, secret_value, notes, provenance=prov):
             imported_count += 1
 
     save_config(data)
@@ -110,19 +235,33 @@ def get_cmd(tool, target_ip, user, secret, c_type, testing=False):
     return ""
 
 
-def test_tool(tool, target_ip, user, secret, c_type):
+def test_tool(tool, target_ip, cred):
     fail_keywords = ["failed", "error", "denied", "not known", "invalid", "connection refused", "could not"]
-    cmd = get_cmd(tool, target_ip, user, secret, c_type, testing=True)
+    cmd = get_cmd(tool, target_ip, cred['user'], cred['secret'], cred['type'], testing=True)
+    now = utc_timestamp()
+    status = "failed"
+    summary = "No output"
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=12)
         output = (result.stdout + result.stderr).lower()
-        if result.returncode != 0 or any(kw in output for kw in fail_keywords):
-            log_action(target_ip, user, tool, "AUDIT_FAIL")
-            return False
-        log_action(target_ip, user, tool, "AUDIT_SUCCESS")
-        return True
-    except Exception:
-        return False
+        summary = (result.stdout + result.stderr).strip().replace("\n", " ")[:200] or "No output"
+        if result.returncode == 0 and not any(kw in output for kw in fail_keywords):
+            status = "success"
+            log_action(target_ip, cred['user'], tool, "AUDIT_SUCCESS")
+        else:
+            log_action(target_ip, cred['user'], tool, "AUDIT_FAIL")
+    except Exception as exc:
+        summary = f"Execution error: {exc}"
+
+    testing = cred.setdefault("testing", {"protocols": {}})
+    protocols = testing.setdefault("protocols", {})
+    protocols[tool] = {
+        "last_run": now,
+        "status": status,
+        "output_summary": summary,
+    }
+    cred.setdefault("lifecycle", {}).update({"updated_at": now})
+    return status == "success"
 
 
 def draw_menu(stdscr, title, subtitle, options, current_row):
@@ -235,10 +374,11 @@ def run_titan(stdscr):
                             tools = ["Evil-WinRM", "SMBClient", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
                             for tool in tools:
                                 print(f" Testing {tool.ljust(12)}: ", end="", flush=True)
-                                if test_tool(tool, target_ip, cred['user'], cred['secret'], cred['type']):
+                                if test_tool(tool, target_ip, cred):
                                     print("[ SUCCESS ]")
                                 else:
                                     print("[ FAILED  ]")
+                            save_config(data)
                             input("\nPress Enter to return to T.I.T.A.N.")
                             break
                         elif act_row == 2:
