@@ -7,8 +7,6 @@ import sys
 import curses
 from datetime import datetime
 
-from datetime import datetime
-
 from parsers import parse_credential_file
 
 # --- CONFIGURATION ---
@@ -31,9 +29,8 @@ def load_config():
     if not os.path.exists(CONFIG_FILE): return {}
     try:
         with open(CONFIG_FILE, "r") as f: return json.load(f)
-    except: return {}
-    except Exception:
-        pass
+    except:
+        return {}
 
 
 def utc_timestamp():
@@ -464,27 +461,6 @@ def run_titan(stdscr):
                         elif act_row == 2: break # Back to Creds
                 break # Exit Cred loop to refresh
             
-if __name__ == "__main__":
-    curses.wrapper(run_titan)
-                            break
-                        elif act_row == 1:
-                            curses.endwin()
-                            print(f"\n[*] Auditing all protocols for {cred['user']}...\n")
-                            tools = ["Evil-WinRM", "SMBClient", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
-                            for tool in tools:
-                                print(f" Testing {tool.ljust(12)}: ", end="", flush=True)
-                                if test_tool(tool, target_ip, cred):
-                                    print("[ SUCCESS ]")
-                                else:
-                                    print("[ FAILED  ]")
-                            save_config(data)
-                            input("\nPress Enter to return to T.I.T.A.N.")
-                            break
-                        elif act_row == 2:
-                            break
-                break
-
-
 def build_arg_parser():
     parser = argparse.ArgumentParser(description="T.I.T.A.N. CLI")
     subparsers = parser.add_subparsers(dest="command")
