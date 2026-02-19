@@ -32,6 +32,11 @@ def get_cmd(tool, target_ip, user, secret, c_type, testing=False):
     elif tool == "SMBClient":
         cmd = f"smbclient //{target_ip}/C$ -U '{user}'" + (f" --pw-nt-hash {secret}" if c_type == "hash" else f"%'{secret}'")
         return cmd + " -c 'ls'" if testing else cmd
+    elif tool == "SSH":
+        if c_type == "hash":
+            return "echo 'SSH requires a plaintext password' >&2; exit 1"
+        cmd = f"sshpass -p '{secret}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 '{user}'@{target_ip}"
+        return cmd + " 'whoami'" if testing else cmd
     elif tool == "SecretsDump":
         return f"impacket-secretsdump '{user}'" + (f" -hashes {impacket_secret}" if c_type == "hash" else f":'{secret}'") + f"@{target_ip}"
     elif tool == "Psexec":
@@ -137,7 +142,7 @@ def run_titan(stdscr):
                     elif key_act == ord('q') or key_act == ord('Q'): sys.exit()
                     elif key_act == curses.KEY_ENTER or key_act in [10, 13]:
                         if act_row == 0: # Launch Tool
-                            tools = ["Evil-WinRM", "SMBClient", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
+                            tools = ["Evil-WinRM", "SMBClient", "SSH", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
                             t_row = 0
                             while True:
                                 draw_menu(stdscr, "DISPATCHER", "Select tool to launch:", tools, t_row)
@@ -158,7 +163,7 @@ def run_titan(stdscr):
                         elif act_row == 1: # Audit
                             curses.endwin()
                             print(f"\n[*] Auditing all protocols for {cred['user']}...\n")
-                            tools = ["Evil-WinRM", "SMBClient", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
+                            tools = ["Evil-WinRM", "SMBClient", "SSH", "SecretsDump", "Psexec", "WMIExec", "XFreeRDP3"]
                             for tool in tools:
                                 print(f" Testing {tool.ljust(12)}: ", end="", flush=True)
                                 if test_tool(tool, target_ip, cred['user'], cred['secret'], cred['type']):
