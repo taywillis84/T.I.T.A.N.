@@ -130,7 +130,9 @@ class TitanGUI:
                         username = identity.get("username", "")
                         domain = identity.get("domain", "")
                         user = f"{domain}\\{username}" if domain else username
-                    secret_data = cred.get("secret") or {}
+                    secret_data = cred.get("secret")
+                    if not isinstance(secret_data, dict):
+                        secret_data = {}
                     cred["user"] = user
                     cred["type"] = secret_data.get("type", cred.get("type", "password"))
                     cred["secret"] = secret_data.get("value", cred.get("secret", ""))
