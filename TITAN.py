@@ -509,8 +509,21 @@ class TitanGUI:
                 launch_cmd = f"{launch_cmd} | tee {output_file}"
                 self.log_event(f"LOGGING OUTPUT TO: {output_file}")
 
+            launch_user = f"{cred['user']}"
+            launch_secret = f"{cred['secret']}"
+            terminal_script = (
+                f"echo '=== TITAN COMMAND PREVIEW ==='; "
+                f"echo 'Tool: {tool}'; "
+                f"echo 'Target: {target_ip}'; "
+                f"echo 'User: {launch_user}'; "
+                f"echo 'Secret: {launch_secret}'; "
+                f"echo 'Command: {launch_cmd}'; "
+                f"echo '============================='; "
+                f"{launch_cmd}; exec bash"
+            )
+
             # Launch in a new terminal so the GUI doesn't freeze
-            subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "{launch_cmd}; exec bash"'])
+            subprocess.Popen(['x-terminal-emulator', '-e', 'bash', '-c', terminal_script])
             self.log_event(f"TOOL LAUNCHED: {tool} on {target_ip} as {cred['user']}")
 
     def ingest_parsed_credentials(self, target_ip, host, parsed_records, source_label):
