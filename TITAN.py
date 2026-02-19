@@ -237,6 +237,7 @@ class TitanGUI:
         self.cred_cb = ttk.Combobox(c_row, state="readonly")
         self.cred_cb.pack(side="left", expand=True, fill="x")
         self.cred_cb.set("-- SELECT CREDENTIAL --")
+        tk.Button(c_row, text="↻ REUSE", command=self.reuse_selected_credential, bg="#393E46", fg=ACCENT, font=("Courier", 8, "bold"), width=8).pack(side="left", padx=5)
         tk.Button(c_row, text="⚙ MANAGE", command=self.open_cred_manager, bg="#393E46", fg=ACCENT, font=("Courier", 8, "bold"), width=8).pack(side="left", padx=5)
 
         grid = tk.Frame(strike_frame, bg=BG_DARK)
@@ -432,6 +433,51 @@ class TitanGUI:
             )
         )
         return True
+
+    def reuse_selected_credential(self):
+        src_ip = self.target_cb.get()
+        cred_idx = self.cred_cb.current()
+        if src_ip == "-- SELECT TARGET --" or cred_idx == -1:
+            messagebox.showwarning("Selection Required", "Select a source target and credential first.")
+            return
+
+        cred = self.data[src_ip]['creds'][cred_idx]
+        destination_ip = simpledialog.askstring(
+            "Reuse Credential",
+            "Enter destination target IP for credential reuse:",
+            parent=self.root
+        )
+        if not destination_ip:
+            return
+        destination_ip = destination_ip.strip()
+
+        if destination_ip == src_ip:
+            messagebox.showinfo("No Action", "Source and destination targets are the same.")
+            return
+
+        if destination_ip not in self.data:
+            destination_host = simpledialog.askstring(
+                "New Target Hostname",
+                f"Hostname for {destination_ip} (optional):",
+                parent=self.root
+            )
+            self.data[destination_ip] = {"hostname": destination_host.strip() if destination_host else "Reused", "creds": []}
+
+        notes = cred.get("notes", "")
+        if notes:
+            notes = f"{notes} | Reused from {src_ip}"
+        else:
+            notes = f"Reused from {src_ip}"
+
+        if self.add_unique(destination_ip, cred['user'], cred['type'], cred['secret'], notes):
+            self.save_config()
+            self.target_cb['values'] = list(self.data.keys())
+            self.target_cb.set(destination_ip)
+            self.update_creds()
+            self.log_event(f"CREDENTIAL REUSED: {cred['user']} from {src_ip} to {destination_ip}")
+            messagebox.showinfo("Credential Reused", f"Copied {cred['user']} from {src_ip} to {destination_ip}.")
+        else:
+            messagebox.showwarning("Duplicate Credential", f"{cred['user']} already exists on {destination_ip}.")
 
     def check_reachability(self):
         ip = self.target_cb.get()
