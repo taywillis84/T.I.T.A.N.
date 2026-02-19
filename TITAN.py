@@ -241,7 +241,7 @@ class TitanGUI:
 
         grid = tk.Frame(strike_frame, bg=BG_DARK)
         grid.pack(pady=10)
-        tools = ["Evil-WinRM", "SMBClient", "Psexec", "WMIExec", "XFreeRDP3", "SecretsDump"]
+        tools = ["Evil-WinRM", "SMBClient", "SSH", "Psexec", "WMIExec", "XFreeRDP3", "SecretsDump"]
         for i, tool in enumerate(tools):
             btn = tk.Button(grid, text=tool.upper(), command=lambda t=tool: self.launch(t), 
                             bg=BG_PANEL, fg=ACCENT, width=15, height=2)
@@ -259,6 +259,11 @@ class TitanGUI:
         
         elif tool == "SMBClient": 
             return f"smbclient //{target_ip}/C$ -U '{user}'" + (f" --pw-nt-hash {secret}" if c_type == "hash" else f"%'{secret}'") + " -c 'ls'"
+
+        elif tool == "SSH":
+            if c_type == "hash":
+                return "echo 'SSH requires a plaintext password' >&2; exit 1"
+            return f"sshpass -p '{secret}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=6 '{user}'@{target_ip} 'whoami'"
         
         elif tool == "SecretsDump": 
             clean_user = user
@@ -409,6 +414,9 @@ class TitanGUI:
         if self.add_unique(ip, user, c_type, secret, notes):
             self.save_config(); self.target_cb['values'] = list(self.data.keys()); self.update_creds()
             self.log_event(f"TARGET ADDED: {user}@{ip}")
+            messagebox.showinfo("Credential Added", f"Saved credential for {user} on {ip} ({c_type}).")
+        else:
+            messagebox.showwarning("Duplicate Credential", f"{user} is already saved for {ip} with the same secret.")
 
     def add_unique(self, ip, user, c_type, secret, notes="", provenance=None):
         if any(c['user'] == user and c['secret'] == secret for c in self.data[ip]['creds']):
