@@ -1,11 +1,12 @@
 import json
 import os
 import subprocess
-import re
 import threading
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk, simpledialog
 from datetime import datetime
+
+from parsers import parse_credential_file
 
 # --- CONFIGURATION & THEME ---
 BG_DARK = "#121212"
@@ -20,6 +21,7 @@ FAIL_RED = "#E74C3C"
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "targets.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "titan_history.log")
+SCHEMA_VERSION = 2
 
 class TitanGUI:
     def __init__(self, root):
@@ -36,13 +38,129 @@ class TitanGUI:
 
     def load_config(self):
         if not os.path.exists(CONFIG_FILE):
-            with open(CONFIG_FILE, "w") as f: json.dump({}, f)
+            with open(CONFIG_FILE, "w") as f:
+                json.dump({"schema_version": SCHEMA_VERSION, "targets": {}}, f, indent=4)
         try:
-            with open(CONFIG_FILE, "r") as f: return json.load(f)
-        except: return {}
+            with open(CONFIG_FILE, "r") as f:
+                raw_data = json.load(f)
+        except Exception:
+            raw_data = {}
+
+        migrated = self._migrate_config(raw_data)
+        if migrated != raw_data:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(migrated, f, indent=4)
+        return migrated.get("targets", {})
 
     def save_config(self):
-        with open(CONFIG_FILE, "w") as f: json.dump(self.data, f, indent=4)
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "targets": self.data,
+        }
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(payload, f, indent=4)
+
+    def _utc_timestamp(self):
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _split_user_domain(self, user):
+        if "\\" in user:
+            domain, username = user.split("\\", 1)
+            return username, domain
+        return user, ""
+
+    def _build_credential(self, target_scope, user, secret_type, secret_value, notes="", provenance=None, existing=None):
+        now = self._utc_timestamp()
+        username, domain = self._split_user_domain(user)
+        existing = existing or {}
+        provenance = provenance or {}
+        legacy_added = existing.get("added") or existing.get("first_seen")
+        lifecycle = existing.get("lifecycle") if isinstance(existing.get("lifecycle"), dict) else {}
+
+        cred = {
+            "identity": {
+                "username": username,
+                "domain": domain,
+                "target_scope": target_scope,
+            },
+            "secret": {
+                "type": secret_type,
+                "value": secret_value,
+            },
+            "provenance": {
+                "imported_from": provenance.get("imported_from") or (existing.get("provenance") or {}).get("imported_from") or "manual",
+                "parser": provenance.get("parser") or (existing.get("provenance") or {}).get("parser") or "manual",
+                "first_seen": provenance.get("first_seen") or (existing.get("provenance") or {}).get("first_seen") or legacy_added or now,
+                "raw_evidence_snippet": provenance.get("raw_evidence_snippet") or notes or (existing.get("provenance") or {}).get("raw_evidence_snippet") or "",
+            },
+            "testing": existing.get("testing") if isinstance(existing.get("testing"), dict) else {"protocols": {}},
+            "lifecycle": {
+                "added_at": lifecycle.get("added_at") or legacy_added or now,
+                "updated_at": now,
+                "active": lifecycle.get("active", True),
+            },
+            "notes": notes or existing.get("notes", ""),
+            "user": user,
+            "type": secret_type,
+            "secret": secret_value,
+            "added": legacy_added or now,
+        }
+        return cred
+
+    def _migrate_config(self, raw_data):
+        if isinstance(raw_data, dict) and "targets" in raw_data:
+            targets = raw_data.get("targets") or {}
+        elif isinstance(raw_data, dict):
+            targets = raw_data
+        else:
+            targets = {}
+
+        migrated_targets = {}
+        for target_ip, target_data in targets.items():
+            target_data = target_data if isinstance(target_data, dict) else {}
+            creds = target_data.get("creds") if isinstance(target_data.get("creds"), list) else []
+            migrated_creds = []
+            for cred in creds:
+                if not isinstance(cred, dict):
+                    continue
+                if all(k in cred for k in ["identity", "secret", "provenance", "testing", "lifecycle"]):
+                    user = cred.get("user")
+                    if not user:
+                        identity = cred.get("identity") or {}
+                        username = identity.get("username", "")
+                        domain = identity.get("domain", "")
+                        user = f"{domain}\\{username}" if domain else username
+                    secret_data = cred.get("secret") or {}
+                    cred["user"] = user
+                    cred["type"] = secret_data.get("type", cred.get("type", "password"))
+                    cred["secret"] = secret_data.get("value", cred.get("secret", ""))
+                    cred["notes"] = cred.get("notes") or (cred.get("provenance") or {}).get("raw_evidence_snippet", "")
+                    cred["added"] = cred.get("added") or (cred.get("lifecycle") or {}).get("added_at") or self._utc_timestamp()
+                    migrated_creds.append(cred)
+                    continue
+
+                user = cred.get("user", "")
+                secret_type = cred.get("type", "password")
+                secret_value = cred.get("secret", "")
+                notes = cred.get("notes", "")
+                migrated_creds.append(
+                    self._build_credential(
+                        target_scope=target_ip,
+                        user=user,
+                        secret_type=secret_type,
+                        secret_value=secret_value,
+                        notes=notes,
+                        provenance={"imported_from": "legacy", "parser": "legacy"},
+                        existing=cred,
+                    )
+                )
+
+            migrated_targets[target_ip] = {
+                "hostname": target_data.get("hostname", "N/A"),
+                "creds": migrated_creds,
+            }
+
+        return {"schema_version": SCHEMA_VERSION, "targets": migrated_targets}
 
     def log_event(self, message):
         """Appends a timestamped message to the titan_history.log file"""
@@ -204,6 +322,17 @@ class TitanGUI:
                         (tool in ["Psexec", "WMIExec"] and not result.stdout.strip())
                     )
 
+                    testing = cred.setdefault("testing", {"protocols": {}})
+                    protocols = testing.setdefault("protocols", {})
+                    summary = (result.stdout + result.stderr).strip().replace("\n", " ")[:200] or "No output"
+                    status = "failed" if is_failed else "success"
+                    protocols[tool] = {
+                        "last_run": self._utc_timestamp(),
+                        "status": status,
+                        "output_summary": summary,
+                    }
+                    cred.setdefault("lifecycle", {}).update({"updated_at": self._utc_timestamp()})
+
                     if is_failed:
                         btn.config(bg=FAIL_RED, fg="white")
                         self.log_event(f"FUNCTIONAL FAIL: {tool} on {target_ip} - {combined_output[:50]}...")
@@ -211,8 +340,17 @@ class TitanGUI:
                         btn.config(bg=SUCCESS_GREEN, fg="black")
                         self.log_event(f"TEST SUCCESS: {tool} on {target_ip}")
                 except Exception as e:
+                    testing = cred.setdefault("testing", {"protocols": {}})
+                    protocols = testing.setdefault("protocols", {})
+                    protocols[tool] = {
+                        "last_run": self._utc_timestamp(),
+                        "status": "failed",
+                        "output_summary": f"Execution error: {str(e)}",
+                    }
+                    cred.setdefault("lifecycle", {}).update({"updated_at": self._utc_timestamp()})
                     btn.config(bg=FAIL_RED, fg="white")
                     self.log_event(f"EXECUTION ERROR: {tool} - {str(e)}")
+            self.save_config()
         
         threading.Thread(target=run_tests, daemon=True).start()
 
@@ -249,8 +387,16 @@ class TitanGUI:
         s = simpledialog.askstring("Edit", "Secret:", initialvalue=c['secret'], parent=self.root)
         if not s: return
         n = simpledialog.askstring("Edit", "Notes:", initialvalue=c.get('notes', ''), parent=self.root)
-        self.data[target]['creds'][idx].update({"user": u, "secret": s, "notes": n if n else ""})
-        self.data[target]['creds'][idx]['type'] = "hash" if len(s) == 32 and all(x in "0123456789abcdefABCDEF" for x in s) else "password"
+        c_type = "hash" if len(s) == 32 and all(x in "0123456789abcdefABCDEF" for x in s) else "password"
+        self.data[target]['creds'][idx] = self._build_credential(
+            target_scope=target,
+            user=u,
+            secret_type=c_type,
+            secret_value=s,
+            notes=n if n else "",
+            provenance=(c.get("provenance") if isinstance(c.get("provenance"), dict) else None),
+            existing=c,
+        )
         self.save_config(); self.refresh_manager_list(frame, target); self.update_creds()
         self.log_event(f"CREDENTIAL EDITED: {u} on {target}")
 
@@ -273,9 +419,19 @@ class TitanGUI:
         else:
             messagebox.showwarning("Duplicate Credential", f"{user} is already saved for {ip} with the same secret.")
 
-    def add_unique(self, ip, user, c_type, secret, notes=""):
-        if any(c['user'] == user and c['secret'] == secret for c in self.data[ip]['creds']): return False
-        self.data[ip]['creds'].append({"user": user, "type": c_type, "secret": secret, "notes": notes, "added": datetime.now().strftime("%Y-%m-%d %H:%M")})
+    def add_unique(self, ip, user, c_type, secret, notes="", provenance=None):
+        if any(c['user'] == user and c['secret'] == secret for c in self.data[ip]['creds']):
+            return False
+        self.data[ip]['creds'].append(
+            self._build_credential(
+                target_scope=ip,
+                user=user,
+                secret_type=c_type,
+                secret_value=secret,
+                notes=notes,
+                provenance=provenance,
+            )
+        )
         return True
 
     def reuse_selected_credential(self):
@@ -357,78 +513,69 @@ class TitanGUI:
             subprocess.Popen(['x-terminal-emulator', '-e', f'bash -c "{launch_cmd}; exec bash"'])
             self.log_event(f"TOOL LAUNCHED: {tool} on {target_ip} as {cred['user']}")
 
+    def ingest_parsed_credentials(self, target_ip, host, parsed_records, source_label):
+        if target_ip not in self.data:
+            self.data[target_ip] = {"hostname": host or "Imported", "creds": []}
+
+        count = 0
+        for record in parsed_records:
+            username = record.get("username") or ""
+            domain = record.get("domain") or ""
+            secret_type = record.get("secret_type") or "password"
+            secret_value = record.get("secret_value") or ""
+            if not username or not secret_value:
+                continue
+
+            full_user = f"{domain}\\{username}" if domain and domain != "LOCAL" else username
+            context = record.get("source_context") or source_label
+            source_file = os.path.basename(record.get("source_file") or source_label)
+            source_line = record.get("source_line")
+            notes = f"{secret_type.upper()} | {source_file}"
+            if source_line:
+                notes += f":{source_line}"
+            if context:
+                notes += f" | {context[:80]}"
+
+            provenance = {
+                "imported_from": source_file,
+                "parser": "parse_credential_file",
+                "first_seen": self._utc_timestamp(),
+                "raw_evidence_snippet": context[:200] if context else notes,
+            }
+
+            if self.add_unique(target_ip, full_user, secret_type, secret_value, notes, provenance=provenance):
+                count += 1
+
+        return count
+
     def import_mimi(self):
-        """Advanced parser: Prioritizes cleartext passwords, falls back to NTLM hashes."""
-        file_path = filedialog.askopenfilename(title="Select Mimikatz Output", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
-        if not file_path: return
-        
+        file_path = filedialog.askopenfilename(title="Select Credential Dump", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+        if not file_path:
+            return
+
         target_ip = self.ip_entry.get()
         if not target_ip:
             messagebox.showwarning("Input Required", "Please enter a Target IP in Step 1 before importing.")
             return
 
         try:
-            # Handle potential UTF-16 encoding from Mimikatz logs
-            try:
-                with open(file_path, "r", encoding="utf-16") as f:
-                    content = f.read()
-            except (UnicodeError, UnicodeDecodeError):
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-            
-            # Split by Authentication Id to isolate distinct user sessions
-            sessions = content.split('Authentication Id :')
-            count = 0
-            
-            for session in sessions:
-                # 1. Identify User and Domain
-                user_match = re.search(r'\* Username : (.+)', session)
-                dom_match = re.search(r'\* Domain\s+: (.+)', session)
-                
-                if not user_match: continue
-                
-                user = user_match.group(1).strip()
-                domain = dom_match.group(1).strip() if dom_match else ""
-                
-                # Skip machine accounts and empty entries
-                if user == '(null)' or user.endswith('$'): continue
-                
-                # 2. Priority Logic: Scan for any cleartext password in the session
-                passwords = re.findall(r'\* Password : (.*)', session)
-                cleartext = None
-                for p in passwords:
-                    p_clean = p.strip()
-                    if p_clean and p_clean != '(null)':
-                        cleartext = p_clean
-                        break 
-
-                # 3. Fallback: Identify NTLM Hash
-                ntlm_match = re.search(r'\* NTLM\s+: ([a-fA-F0-9]{32})', session)
-                ntlm_hash = ntlm_match.group(1).strip() if ntlm_match else None
-
-                # 4. Ingest into TITAN Data
-                if target_ip not in self.data:
-                    self.data[target_ip] = {"hostname": self.host_entry.get() or "Imported", "creds": []}
-                
-                full_user = f"{domain}\\{user}" if domain and domain != "LOCAL" else user
-                
-                # Apply User Choice: Password if found, else NTLM
-                if cleartext:
-                    if self.add_unique(target_ip, full_user, "password", cleartext, "Mimi Cleartext"):
-                        count += 1
-                elif ntlm_hash:
-                    if self.add_unique(target_ip, full_user, "hash", ntlm_hash, "Mimi NTLM"):
-                        count += 1
-            
+            parsed_records = parse_credential_file(file_path)
+            imported_count = self.ingest_parsed_credentials(
+                target_ip=target_ip,
+                host=self.host_entry.get(),
+                parsed_records=parsed_records,
+                source_label="GUI Import",
+            )
             self.save_config()
             self.target_cb['values'] = list(self.data.keys())
             self.update_creds()
-            self.log_event(f"MIMIKATZ IMPORT: Processed {count} credentials for {target_ip}")
-            messagebox.showinfo("Import Complete", f"Successfully imported {count} credentials for {target_ip}.")
-            
+            self.log_event(f"CREDENTIAL IMPORT: Processed {imported_count} credentials for {target_ip} from {file_path}")
+            messagebox.showinfo("Import Complete", f"Successfully imported {imported_count} credentials for {target_ip}.")
+
         except Exception as e:
-            self.log_event(f"MIMIKATZ IMPORT ERROR: {str(e)}")
+            self.log_event(f"CREDENTIAL IMPORT ERROR: {str(e)}")
             messagebox.showerror("Error", f"Failed to parse file: {str(e)}")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
